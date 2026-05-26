@@ -27,6 +27,29 @@ CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL", "120"))
 THRESHOLD_PCT     = float(os.environ.get("THRESHOLD_PCT", "1.0"))
 
 # ============================================================
+# 📊 Watchlist เริ่มต้น (ใช้เมื่อ Sheet ว่าง)
+# ============================================================
+
+DEFAULT_WATCHLIST = {
+    # SEMICONDUCTORS
+    "NVDA": 194.0, "ARM": 286.0, "MRVL": 168.0, "INTC": 111.0,
+    "FORM": 128.0, "WOLF": 65.4, "NVTS": 25.8,
+    # SPACE TECHNOLOGY
+    "ASTS": 93.0, "RKLB": 119.0, "PL": 39.0, "SATL": 9.5,
+    # PHOTONICS
+    "COHR": 366.0, "LITE": 879.0, "AEHR": 90.0, "AAOI": 174.5,
+    "LWLG": 12.7, "POET": 13.6,
+    # DRONE & DEFENSE
+    "PLTR": 120.0, "ONDS": 9.0, "OSS": 15.6,
+    # MEMORY
+    "SIMO": 237.0, "SNDK": 1355.0, "MRAM": 29.0,
+    # QUANTUM COMPUTING
+    "IONQ": 59.7, "RGTI": 26.4, "QBTS": 26.6,
+    # ENERGY
+    "BE": 274.0, "AMPX": 15.3,
+}
+
+# ============================================================
 # 🔑 Google Sheets Auth
 # ============================================================
 
@@ -84,7 +107,8 @@ def sheets_token() -> str:
 SHEET_RANGE = "Sheet1!A:B"
 
 def sheet_read() -> dict:
-    """อ่าน watchlist จาก Google Sheet → {TICKER: price}"""
+    """อ่าน watchlist จาก Google Sheet
+       ถ้า Sheet ว่าง → เขียน DEFAULT_WATCHLIST ลงไปอัตโนมัติ"""
     try:
         url = f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}/values/{SHEET_RANGE}"
         r = requests.get(url, headers={"Authorization": f"Bearer {sheets_token()}"}, timeout=10)
@@ -94,16 +118,21 @@ def sheet_read() -> dict:
             if len(row) < 2:
                 continue
             ticker = row[0].strip().upper().replace("$", "")
-            if ticker == "TICKER":  # ข้าม header
+            if ticker == "TICKER":
                 continue
             try:
                 wl[ticker] = float(row[1])
             except ValueError:
                 pass
+        # Sheet ว่าง → เขียน DEFAULT_WATCHLIST ลงไปอัตโนมัติ
+        if not wl:
+            print("[Sheet] Sheet ว่าง → เขียน DEFAULT_WATCHLIST...")
+            sheet_write(DEFAULT_WATCHLIST)
+            return DEFAULT_WATCHLIST.copy()
         return wl
     except Exception as e:
         print(f"[Sheet] read ERROR: {e}")
-        return {}
+        return DEFAULT_WATCHLIST.copy()
 
 
 def sheet_write(watchlist: dict):
