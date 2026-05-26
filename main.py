@@ -330,8 +330,15 @@ def handle_command(text: str, watchlist: dict, alerted: dict) -> dict:
             send("\n".join(lines))
 
     elif cmd == "/check":
-        send("🔍 กำลังเช็คราคา รอแป๊บนึงครับ...")
-        check_and_report(watchlist)
+        # /check → เช็คทั้งหมด
+        # /check NVDA TSLA → เช็คเฉพาะที่ระบุ
+        if len(parts) == 1:
+            send("🔍 กำลังเช็คราคาทั้งหมด รอแป๊บนึงครับ...")
+            check_and_report(watchlist)
+        else:
+            custom = [p.upper().replace("$","") for p in parts[1:]]
+            send(f"🔍 กำลังเช็ค {', '.join(['$'+t for t in custom])} รอแป๊บนึงครับ...")
+            check_and_report(watchlist, custom_tickers=custom)
 
     elif cmd == "/status":
         now    = datetime.now(timezone.utc)
@@ -372,37 +379,58 @@ def handle_command(text: str, watchlist: dict, alerted: dict) -> dict:
     return watchlist
 
 
-def check_and_report(watchlist: dict):
+def check_and_report(watchlist: dict, custom_tickers: list = None):
     if not watchlist:
         send("📋 Watchlist ว่างอยู่ครับ")
         return
-    tickers = list(watchlist.keys())
+    # ถ้ามี custom_tickers ให้เช็คเฉพาะตัวที่ระบุ (รวมตัวที่ไม่อยู่ใน watchlist ด้วย)
+    if custom_tickers:
+        tickers = custom_tickers
+    else:
+        tickers = list(watchlist.keys())
     try:
-        data = yf.download(tickers, period="1d", interval="5m", progress=False, auto_adjust=True)
-        if data.empty:
-            send("⚠️ ดึงข้อมูลไม่ได้ (อาจนอกเวลาตลาด)")
+        BATCH_SIZE = 10
+        prices = {}
+        for i in range(0, len(tickers), BATCH_SIZE):
+            batch = tickers[i:i+BATCH_SIZE]
+            try:
+                data = yf.download(batch, period="1d", interval="5m", progress=False, auto_adjust=True)
+                if not data.empty:
+                    last = data["Close"].iloc[-1]
+                    for t in batch:
+                        try:
+                            prices[t] = float(last[t])
+                        except Exception:
+                            pass
+                time.sleep(2)
+            except Exception as e:
+                print(f"  [batch] ERROR: {e}")
+        if not prices:
+            send("⚠️ ดึงข้อมูลไม่ได้ (อาจนอกเวลาตลาด หรือ rate limit)")
             return
-        prices = data["Close"].iloc[-1]
     except Exception as e:
         send(f"❌ Error: {e}")
         return
 
     lines = ["📊 <b>ราคาล่าสุด</b>", "━━━━━━━━━━━━━━━"]
-    for ticker, levels in sorted(watchlist.items()):
+    for ticker in sorted(tickers):
         try:
-            price = float(prices[ticker])
-            valid = [v for v in levels if v is not None]
+            price = prices.get(ticker, float("nan"))
+            if price != price:
+                raise ValueError("NaN")
+            levels = watchlist.get(ticker, [None, None, None])
+            valid  = [v for v in levels if v is not None]
             if not valid:
-                lines.append(f"📌 <b>${ticker}</b>  ${price:.2f}  (ไม่มีแนวรับ)")
-                continue
-            s_parts = []
-            for i, v in enumerate(levels):
-                if v is None:
-                    continue
-                pct  = (price - v) / v * 100
-                icon = "⚠️" if abs(pct) <= THRESHOLD_PCT else ("🔴" if pct < 0 else "✅")
-                s_parts.append(f"S{i+1}={icon}${v:.2f}({pct:+.1f}%)")
-            lines.append(f"📌 <b>${ticker}</b>  ${price:.2f}\n    {' | '.join(s_parts)}")
+                lines.append(f"📌 <b>${ticker}</b>  ${price:.2f}  (ไม่มีแนวรับใน watchlist)")
+            else:
+                s_parts = []
+                for i, v in enumerate(levels):
+                    if v is None:
+                        continue
+                    pct  = (price - v) / v * 100
+                    icon = "⚠️" if abs(pct) <= THRESHOLD_PCT else ("🔴" if pct < 0 else "✅")
+                    s_parts.append(f"S{i+1}={icon}${v:.2f}({pct:+.1f}%)")
+                lines.append(f"📌 <b>${ticker}</b>  ${price:.2f}\n    {' | '.join(s_parts)}")
         except Exception:
             lines.append(f"❓ ${ticker} — ไม่มีข้อมูล")
     send("\n".join(lines))
@@ -453,7 +481,6 @@ def check_prices(watchlist: dict, alerted: dict):
         return
 
     try:
-        data = yf.download(tickers, period="1d", interval="5m", progress=False, auto_adjust=True)
         status["last_check"] = datetime.now(timezone.utc)
 
         # reset daily counter
@@ -462,17 +489,36 @@ def check_prices(watchlist: dict, alerted: dict):
             status["alert_today"]      = 0
             status["last_alert_reset"] = today
 
-        if data.empty:
-            print("  ⚠️ ไม่ได้ข้อมูล")
+        # แบ่งดึงเป็น batch ละ 10 ตัว ป้องกัน rate limit
+        BATCH_SIZE = 10
+        all_prices = {}
+        for i in range(0, len(tickers), BATCH_SIZE):
+            batch = tickers[i:i+BATCH_SIZE]
+            try:
+                data = yf.download(batch, period="1d", interval="5m", progress=False, auto_adjust=True)
+                if not data.empty:
+                    last = data["Close"].iloc[-1]
+                    for t in batch:
+                        try:
+                            all_prices[t] = float(last[t])
+                        except Exception:
+                            pass
+                time.sleep(2)  # หน่วงเล็กน้อยระหว่าง batch
+            except Exception as e:
+                print(f"  [batch {i//BATCH_SIZE+1}] ERROR: {e}")
+                time.sleep(5)
+
+        if not all_prices:
+            print("  ⚠️ ไม่ได้ข้อมูลเลย")
             return
 
-        prices = data["Close"].iloc[-1]
+        prices = all_prices
         ok_count = 0
         status["last_total"] = len(tickers)
 
         for ticker, levels in watchlist.items():
             try:
-                price = float(prices[ticker])
+                price = float(prices.get(ticker, float("nan")))
                 if price != price:
                     raise ValueError("NaN")
                 ok_count += 1
