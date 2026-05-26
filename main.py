@@ -12,7 +12,7 @@ import time
 import threading
 import requests
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ============================================================
 # 🔧 Config จาก Environment Variables
@@ -25,6 +25,21 @@ GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")  # JSON string ท�
 
 CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL", "120"))
 THRESHOLD_PCT     = float(os.environ.get("THRESHOLD_PCT", "1.0"))
+
+# ============================================================
+# 📡 Status Tracking
+# ============================================================
+
+BOT_START_TIME   = datetime.now(timezone.utc)
+status = {
+    "last_check": None,        # เวลาเช็คล่าสุด
+    "last_ok_count": 0,        # จำนวนหุ้นที่ดึงได้ล่าสุด
+    "last_total": 0,           # จำนวนหุ้นทั้งหมด
+    "alert_today": 0,          # แจ้งเตือนวันนี้
+    "yfinance_ok": True,       # yfinance status
+    "sheet_ok": True,          # Google Sheet status
+    "last_alert_reset": datetime.now(timezone.utc).date(),
+}
 
 # ============================================================
 # 📊 Watchlist เริ่มต้น (ใช้เมื่อ Sheet ว่าง)
@@ -88,7 +103,12 @@ def get_access_token() -> str:
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "assertion": jwt_token,
     }, timeout=10)
-    return r.json()["access_token"]
+    token = r.json().get("access_token")
+    if token:
+        status["sheet_ok"] = True
+    else:
+        status["sheet_ok"] = False
+    return token
 
 
 # Cache token
@@ -216,6 +236,9 @@ HELP_TEXT = """
 🔍 <b>เช็คราคาทันที:</b>
 <code>/check</code>
 
+📡 <b>เช็คสถานะ bot:</b>
+<code>/status</code>
+
 ❓ <b>ดูคำสั่ง:</b>
 <code>/help</code>
 """
@@ -269,6 +292,53 @@ def handle_command(text: str, watchlist: dict, alerted: dict) -> dict:
     elif cmd == "/check":
         send("🔍 กำลังเช็คราคา รอแป๊บนึงครับ...")
         check_and_report(watchlist)
+
+    elif cmd == "/status":
+        now = datetime.now(timezone.utc)
+        # reset alert counter ถ้าข้ามวัน
+        if now.date() != status["last_alert_reset"]:
+            status["alert_today"] = 0
+            status["last_alert_reset"] = now.date()
+
+        uptime = now - BOT_START_TIME
+        hours, rem = divmod(int(uptime.total_seconds()), 3600)
+        minutes = rem // 60
+
+        thai_now = now.hour + 7
+        thai_h = thai_now % 24
+        time_str = f"{now.day:02d}/{now.month:02d}/{now.year} {thai_h:02d}:{now.minute:02d} น."
+
+        if status["last_check"]:
+            diff = int((now - status["last_check"]).total_seconds())
+            if diff < 60:
+                last_check_str = f"{diff} วินาทีที่แล้ว"
+            else:
+                last_check_str = f"{diff // 60} นาทีที่แล้ว"
+        else:
+            last_check_str = "ยังไม่ได้เช็ค"
+
+        market = is_market_open()
+        market_str = "🟢 เปิดอยู่" if market else "🔴 ปิดอยู่"
+
+        yf_str    = "✅ OK" if status["yfinance_ok"] else "❌ Error"
+        sheet_str = "✅ OK" if status["sheet_ok"]   else "❌ Error"
+
+        send(
+            f"📡 <b>Bot Status</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"✅ Bot Online\n"
+            f"⏱ Uptime: {hours} ชั่วโมง {minutes} นาที\n"
+            f"🕐 เวลาไทย: {time_str}\n\n"
+            f"📊 <b>รอบล่าสุด</b>\n"
+            f"🔄 เช็คล่าสุด: {last_check_str}\n"
+            f"📈 ราคาที่ดึงได้: {status['last_ok_count']}/{status['last_total']} ตัว\n"
+            f"🚨 แจ้งเตือนวันนี้: {status['alert_today']} ครั้ง\n\n"
+            f"🌐 <b>API Status</b>\n"
+            f"  yfinance: {yf_str}\n"
+            f"  Google Sheet: {sheet_str}\n"
+            f"  Telegram: ✅ OK\n\n"
+            f"🕰 ตลาด US: {market_str}"
+        )
 
     else:
         send(f"❓ ไม่รู้จักคำสั่ง <code>{cmd}</code>\nพิมพ์ /help เพื่อดูคำสั่งทั้งหมด")
@@ -351,24 +421,49 @@ def price_loop(watchlist_ref: list, alerted_ref: list):
             print(f"\n[{datetime.utcnow().strftime('%H:%M:%S')} UTC] เช็ค {len(tickers)} ตัว...")
             try:
                 data = yf.download(tickers, period="1d", interval="5m", progress=False, auto_adjust=True)
+                status["last_check"] = datetime.now(timezone.utc)
+                # reset alert counter ถ้าข้ามวัน
+                today = datetime.now(timezone.utc).date()
+                if today != status["last_alert_reset"]:
+                    status["alert_today"] = 0
+                    status["last_alert_reset"] = today
                 if not data.empty:
                     prices = data["Close"].iloc[-1]
+                    ok_count = 0
+                    status["last_total"] = len(tickers)
                     for ticker, support in watchlist.items():
                         try:
                             price = float(prices[ticker])
                             if price != price: raise ValueError("NaN")
+                            ok_count += 1
                             pct  = (price - support) / support * 100
                             near = pct <= THRESHOLD_PCT
                             print(f"  {'⚠️ ' if near else '✅'} ${ticker:6s}  {price:8.2f}  แนวรับ={support:.2f}  ({pct:+.2f}%)")
                             if near and not alerted.get(ticker, False):
                                 notify_alert(ticker, price, support, pct)
                                 alerted[ticker] = True
+                                status["alert_today"] += 1
                             elif pct > 3.0:
                                 alerted[ticker] = False
                         except Exception:
                             print(f"  ❓ ${ticker} — ข้ามไป")
+                    status["last_ok_count"] = ok_count
+                    status["yfinance_ok"]   = True
             except Exception as e:
+                status["yfinance_ok"] = False
                 print(f"  [yfinance] ERROR: {e}")
+
+        # แจ้งเตือนสรุปเช้า 08:00 น. ไทย (01:00 UTC)
+        now_utc = datetime.now(timezone.utc)
+        if now_utc.hour == 1 and now_utc.minute < 2:
+            send(
+                f"🌅 <b>สรุปเช้าวันนี้</b>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"📊 ติดตาม {len(watchlist)} หุ้น\n"
+                f"🚨 แจ้งเตือนเมื่อวาน: {status['alert_today']} ครั้ง\n"
+                f"🕰 ตลาด US เปิด: 21:30 น. คืนนี้\n"
+                f"💡 พิมพ์ /status เพื่อดูสถานะ"
+            )
 
         sleep = CHECK_INTERVAL if is_market_open() else 600
         if not is_market_open():
