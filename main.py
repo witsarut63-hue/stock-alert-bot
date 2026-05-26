@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Stock Support Level Alert Bot — Railway Cloud
-แจ้งเตือนเมื่อราคาหุ้นถึงแนวรับ → Line Notify + Telegram
+Stock Support Level Alert Bot — Telegram Only
+แจ้งเตือนเมื่อราคาหุ้นถึงแนวรับ → Telegram
 """
 
 import os
@@ -14,12 +14,10 @@ from datetime import datetime
 # 🔧 Config จาก Environment Variables (ตั้งใน Railway Dashboard)
 # ============================================================
 
-LINE_TOKEN      = os.environ.get("LINE_TOKEN", "")
-TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-CHECK_INTERVAL  = int(os.environ.get("CHECK_INTERVAL", "120"))  # วินาที (default 2 นาที)
-THRESHOLD_PCT   = float(os.environ.get("THRESHOLD_PCT", "1.0")) # แจ้งเมื่อห่างแนวรับ ≤ 1%
+CHECK_INTERVAL   = int(os.environ.get("CHECK_INTERVAL", "120"))
+THRESHOLD_PCT    = float(os.environ.get("THRESHOLD_PCT", "1.0"))
 
 # ============================================================
 # 📊 แนวรับทั้งหมดจากรูป
@@ -70,28 +68,12 @@ SUPPORT_LEVELS = {
 }
 
 # ============================================================
-# 📬 ส่งแจ้งเตือน
+# 📬 ส่ง Telegram
 # ============================================================
-
-def send_line(message: str):
-    if not LINE_TOKEN:
-        print("[Line] ไม่มี TOKEN ข้ามไป")
-        return
-    try:
-        r = requests.post(
-            "https://notify-api.line.me/api/notify",
-            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
-            data={"message": message},
-            timeout=10,
-        )
-        print(f"[Line] sent → status={r.status_code}")
-    except Exception as e:
-        print(f"[Line] ERROR: {e}")
-
 
 def send_telegram(message: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("[Telegram] ไม่มี TOKEN/CHAT_ID ข้ามไป")
+        print("[Telegram] ❌ ไม่มี TOKEN หรือ CHAT_ID")
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -104,45 +86,47 @@ def send_telegram(message: str):
             },
             timeout=10,
         )
-        print(f"[Telegram] sent → status={r.status_code}")
+        if r.status_code == 200:
+            print(f"[Telegram] ✅ ส่งสำเร็จ")
+        else:
+            print(f"[Telegram] ⚠️ status={r.status_code} {r.text}")
     except Exception as e:
         print(f"[Telegram] ERROR: {e}")
 
 
-def notify_all(ticker: str, current: float, support: float, pct_diff: float):
-    now = datetime.now().strftime("%d/%m/%Y %H:%M UTC")
+def notify(ticker: str, current: float, support: float, pct_diff: float):
+    now = datetime.utcnow().strftime("%d/%m/%Y %H:%M UTC")
+    thai_time = datetime.utcnow().replace(hour=(datetime.utcnow().hour + 7) % 24)
+    thai_str  = thai_time.strftime("%d/%m/%Y %H:%M น.")
 
-    direction = "🔴 ต่ำกว่าแนวรับ!" if pct_diff < 0 else f"📉 ห่างแนวรับ {pct_diff:.2f}%"
+    if pct_diff < 0:
+        status_line = f"🔴 <b>ต่ำกว่าแนวรับแล้ว! {pct_diff:.2f}%</b>"
+    else:
+        status_line = f"📉 ห่างแนวรับอีก <b>{pct_diff:.2f}%</b>"
 
     msg = (
-        f"\n🚨 <b>แนวรับใกล้แล้ว!</b> [{now}]\n"
+        f"🚨 <b>แนวรับใกล้แล้ว!</b>\n"
+        f"🕐 {thai_str}\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"📌 <b>${ticker}</b>\n"
         f"💰 ราคาปัจจุบัน: <b>${current:.2f}</b>\n"
         f"🎯 แนวรับ: ${support:.2f}\n"
-        f"{direction}"
+        f"{status_line}"
     )
-
-    # Line ไม่รอง HTML ให้แปลงเป็น plain text
-    msg_plain = msg.replace("<b>", "").replace("</b>", "")
-
-    send_line(msg_plain)
     send_telegram(msg)
-    print(f"\n{'='*45}")
-    print(msg_plain)
-    print('='*45)
+    print(f"\n🚨 แจ้งเตือน ${ticker} ราคา={current:.2f} แนวรับ={support:.2f} ห่าง={pct_diff:+.2f}%")
 
 # ============================================================
-# 🔍 ดึงราคาและเช็ค
+# 🔍 เช็คราคา
 # ============================================================
 
-# เก็บสถานะว่าแจ้งไปแล้วหรือยัง (reset เมื่อราคาขึ้นพ้นแนวรับ)
-alerted: dict[str, bool] = {t: False for t in SUPPORT_LEVELS}
+alerted: dict = {t: False for t in SUPPORT_LEVELS}
 
 
 def is_market_open() -> bool:
-    """เช็คว่าตลาด US เปิดอยู่ไหม (Mon-Fri 09:30-16:00 ET ≈ 14:30-21:00 UTC)"""
+    """ตลาด US เปิด Mon-Fri 09:30-16:00 ET = 14:30-21:00 UTC"""
     now = datetime.utcnow()
-    if now.weekday() >= 5:  # เสาร์-อาทิตย์
+    if now.weekday() >= 5:
         return False
     hour = now.hour + now.minute / 60
     return 14.5 <= hour <= 21.0
@@ -150,7 +134,8 @@ def is_market_open() -> bool:
 
 def check_prices():
     tickers = list(SUPPORT_LEVELS.keys())
-    print(f"\n[{datetime.utcnow().strftime('%H:%M:%S')} UTC] เช็คราคา {len(tickers)} ตัว...")
+    now_str = datetime.utcnow().strftime("%H:%M:%S UTC")
+    print(f"\n[{now_str}] เช็คราคา {len(tickers)} ตัว...")
 
     try:
         data = yf.download(
@@ -165,6 +150,7 @@ def check_prices():
             return
 
         prices = data["Close"].iloc[-1]
+
     except Exception as e:
         print(f"  [yfinance] ERROR: {e}")
         return
@@ -172,45 +158,43 @@ def check_prices():
     for ticker, support in SUPPORT_LEVELS.items():
         try:
             price = float(prices[ticker])
-            if price != price:  # NaN check
+            if price != price:
                 raise ValueError("NaN")
         except Exception:
-            print(f"  ⚠️ ${ticker:6s} — ไม่มีข้อมูล")
+            print(f"  ⚠️  ${ticker:6s} — ไม่มีข้อมูล")
             continue
 
         pct_diff = (price - support) / support * 100
+        near = pct_diff <= THRESHOLD_PCT
 
-        # แจ้งเมื่อราคาอยู่ภายใน THRESHOLD_PCT% ของแนวรับ (หรือต่ำกว่า)
-        near_support = pct_diff <= THRESHOLD_PCT
+        icon = "⚠️ " if near else "✅"
+        print(f"  {icon} ${ticker:6s}  ราคา={price:8.2f}  แนวรับ={support:7.2f}  ห่าง={pct_diff:+6.2f}%")
 
-        status = "⚠️ ใกล้แนวรับ!" if near_support else "✅"
-        print(f"  {status} ${ticker:6s}  ราคา={price:8.2f}  แนวรับ={support:7.2f}  ห่าง={pct_diff:+6.2f}%")
-
-        if near_support and not alerted[ticker]:
-            notify_all(ticker, price, support, pct_diff)
+        if near and not alerted[ticker]:
+            notify(ticker, price, support, pct_diff)
             alerted[ticker] = True
         elif pct_diff > 3.0:
-            alerted[ticker] = False  # reset เมื่อราคาขึ้นไปพ้นแล้ว
+            alerted[ticker] = False  # reset เมื่อราคาขึ้นพ้น 3%
 
 # ============================================================
-# 🚀 Main Loop
+# 🚀 Main
 # ============================================================
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("  📡 Stock Support Alert Bot — Railway")
-    print(f"  เช็คทุก {CHECK_INTERVAL}s  |  threshold ≤{THRESHOLD_PCT}%")
-    print(f"  หุ้นที่ติดตาม: {len(SUPPORT_LEVELS)} ตัว")
+    print("  📡 Stock Alert Bot — Telegram Only")
+    print(f"  ติดตาม {len(SUPPORT_LEVELS)} หุ้น | เช็คทุก {CHECK_INTERVAL}s | threshold ≤{THRESHOLD_PCT}%")
     print("=" * 50)
 
-    # แจ้งเตือนว่าบอท start แล้ว
+    tickers_list = " ".join([f"${t}" for t in SUPPORT_LEVELS.keys()])
     start_msg = (
-        f"\n✅ Stock Alert Bot เริ่มทำงานแล้ว!\n"
-        f"📊 ติดตาม {len(SUPPORT_LEVELS)} หุ้น\n"
-        f"⏱ เช็คทุก {CHECK_INTERVAL} วินาที\n"
-        f"🎯 แจ้งเมื่อห่างแนวรับ ≤ {THRESHOLD_PCT}%"
+        f"✅ <b>Stock Alert Bot เริ่มทำงานแล้ว!</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📊 ติดตาม <b>{len(SUPPORT_LEVELS)} หุ้น</b>\n"
+        f"⏱ เช็คทุก <b>{CHECK_INTERVAL} วินาที</b>\n"
+        f"🎯 แจ้งเมื่อห่างแนวรับ ≤ <b>{THRESHOLD_PCT}%</b>\n\n"
+        f"📌 {tickers_list}"
     )
-    send_line(start_msg)
     send_telegram(start_msg)
 
     while True:
@@ -219,7 +203,8 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[MAIN LOOP ERROR] {e}")
 
-        sleep_time = CHECK_INTERVAL if is_market_open() else 600  # นอกเวลาเช็คทุก 10 นาที
-        if not is_market_open():
-            print(f"  💤 ตลาดปิด รอ 10 นาที...")
-        time.sleep(sleep_time)
+        if is_market_open():
+            time.sleep(CHECK_INTERVAL)
+        else:
+            print(f"  💤 ตลาดปิด — รอ 10 นาที")
+            time.sleep(600)
