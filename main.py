@@ -136,30 +136,29 @@ def sheet_read() -> dict:
 
 
 def sheet_write(watchlist: dict):
-    """เขียน watchlist ทั้งหมดลง Google Sheet"""
+    """เขียน watchlist ทั้งหมดลง Google Sheet (clear ก่อน แล้วค่อยเขียน)"""
     try:
-        values = [["TICKER", "SUPPORT"]] + [[t, str(s)] for t, s in sorted(watchlist.items())]
-        url = (f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}"
-               f"/values/{SHEET_RANGE}?valueInputOption=RAW")
-        requests.put(url,
-            headers={"Authorization": f"Bearer {sheets_token()}", "Content-Type": "application/json"},
-            json={"range": SHEET_RANGE, "majorDimension": "ROWS", "values": values},
-            timeout=10
-        )
-        # Clear แถวเกิน
+        token = sheets_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        # 1) Clear ก่อน
         clear_url = (f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}"
                      f"/values/{SHEET_RANGE}:clear")
-        requests.post(clear_url,
-            headers={"Authorization": f"Bearer {sheets_token()}", "Content-Type": "application/json"},
-            timeout=10
-        )
-        # เขียนใหม่หลัง clear
-        requests.put(url,
-            headers={"Authorization": f"Bearer {sheets_token()}", "Content-Type": "application/json"},
+        requests.post(clear_url, headers=headers, timeout=10)
+
+        # 2) เขียนใหม่
+        values = [["TICKER", "SUPPORT"]] + [[t, str(s)] for t, s in sorted(watchlist.items())]
+        write_url = (f"https://sheets.googleapis.com/v4/spreadsheets/{SHEET_ID}"
+                     f"/values/{SHEET_RANGE}?valueInputOption=RAW")
+        r = requests.put(write_url,
+            headers=headers,
             json={"range": SHEET_RANGE, "majorDimension": "ROWS", "values": values},
             timeout=10
         )
-        print(f"[Sheet] เขียน {len(watchlist)} รายการสำเร็จ")
+        if r.status_code == 200:
+            print(f"[Sheet] เขียน {len(watchlist)} รายการสำเร็จ")
+        else:
+            print(f"[Sheet] write WARNING: status={r.status_code} {r.text}")
     except Exception as e:
         print(f"[Sheet] write ERROR: {e}")
 
