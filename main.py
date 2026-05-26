@@ -104,7 +104,7 @@ def sheets_token() -> str:
 # 📊 Google Sheet CRUD
 # ============================================================
 
-SHEET_RANGE = "Sheet1!A:B"
+SHEET_RANGE = "ชีต1!A:B"
 
 def sheet_read() -> dict:
     """อ่าน watchlist จาก Google Sheet
