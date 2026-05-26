@@ -12,7 +12,6 @@ import json
 import time
 import threading
 import requests
-import yfinance as yf
 from datetime import datetime, timezone
 
 # ============================================================
@@ -23,6 +22,7 @@ TELEGRAM_TOKEN    = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 SHEET_ID          = os.environ.get("SHEET_ID", "")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
+FINNHUB_API_KEY   = os.environ.get("FINNHUB_API_KEY", "")
 
 CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL", "300"))
 THRESHOLD_PCT     = float(os.environ.get("THRESHOLD_PCT", "1.0"))
@@ -39,7 +39,7 @@ status = {
     "last_ok_count": 0,
     "last_total": 0,
     "alert_today": 0,
-    "yfinance_ok": True,
+    "data_ok": True,
     "sheet_ok": True,
     "last_alert_reset": datetime.now(timezone.utc).date(),
 }
@@ -206,6 +206,24 @@ def send(message: str):
         print(f"[Telegram] ERROR: {e}")
 
 
+def get_price(ticker: str):
+    """ดึงราคาปัจจุบันจาก Finnhub → คืน float หรือ None"""
+    try:
+        r = requests.get(
+            "https://finnhub.io/api/v1/quote",
+            params={"symbol": ticker, "token": FINNHUB_API_KEY},
+            timeout=10,
+        )
+        data = r.json()
+        price = data.get("c", 0)  # c = current price
+        if price and price > 0:
+            return float(price)
+        return None
+    except Exception as e:
+        print(f"  [Finnhub] ${ticker} ERROR: {e}")
+        return None
+
+
 def thai_time_str() -> str:
     now = datetime.now(timezone.utc)
     th  = (now.hour + 7) % 24
@@ -353,7 +371,7 @@ def handle_command(text: str, watchlist: dict, alerted: dict) -> dict:
             last_str = "ยังไม่ได้เช็ค"
 
         market_str = "🟢 เปิดอยู่" if is_market_open() else "🔴 ปิดอยู่"
-        yf_str     = "✅ OK" if status["yfinance_ok"] else "❌ Error"
+        data_str   = "✅ OK" if status["data_ok"] else "❌ Error"
         sheet_str  = "✅ OK" if status["sheet_ok"]   else "❌ Error"
 
         send(
@@ -367,7 +385,7 @@ def handle_command(text: str, watchlist: dict, alerted: dict) -> dict:
             f"📈 ราคาที่ดึงได้: {status['last_ok_count']}/{status['last_total']} ตัว\n"
             f"🚨 แจ้งเตือนวันนี้: {status['alert_today']} ครั้ง\n\n"
             f"🌐 <b>API Status</b>\n"
-            f"  yfinance: {yf_str}\n"
+            f"  Finnhub: {data_str}\n"
             f"  Google Sheet: {sheet_str}\n"
             f"  Telegram: ✅ OK\n\n"
             f"🕰 ตลาด US: {market_str}"
@@ -391,17 +409,12 @@ def check_and_report(watchlist: dict, custom_tickers: list = None):
     try:
         prices = {}
         for t in tickers:
-            try:
-                tk   = yf.Ticker(t)
-                hist = tk.history(period="1d", interval="5m")
-                if not hist.empty:
-                    prices[t] = float(hist["Close"].iloc[-1])
-                time.sleep(3)
-            except Exception as e:
-                print(f"  ❌ ${t} ERROR: {e}")
-                time.sleep(5)
+            p = get_price(t)
+            if p is not None:
+                prices[t] = p
+            time.sleep(1.1)
         if not prices:
-            send("⚠️ ดึงข้อมูลไม่ได้ (อาจนอกเวลาตลาด)")
+            send("⚠️ ดึงข้อมูลไม่ได้ (เช็ค API key หรือชื่อหุ้น)")
             return
     except Exception as e:
         send(f"❌ Error: {e}")
@@ -484,19 +497,16 @@ def check_prices(watchlist: dict, alerted: dict):
             status["alert_today"]      = 0
             status["last_alert_reset"] = today
 
-        # ดึงทีละตัว หน่วง 3 วินาที ป้องกัน rate limit
+        # ดึงราคาจาก Finnhub ทีละตัว (60 calls/นาที = 1 ตัว/วินาที)
         all_prices = {}
         for t in tickers:
-            try:
-                tk   = yf.Ticker(t)
-                hist = tk.history(period="1d", interval="5m")
-                if not hist.empty:
-                    all_prices[t] = float(hist["Close"].iloc[-1])
-                    print(f"  ✅ ${t} = ${all_prices[t]:.2f}")
-                time.sleep(3)
-            except Exception as e:
-                print(f"  ❌ ${t} ERROR: {e}")
-                time.sleep(5)
+            p = get_price(t)
+            if p is not None:
+                all_prices[t] = p
+                print(f"  ✅ ${t} = ${p:.2f}")
+            else:
+                print(f"  ❌ ${t} ไม่มีข้อมูล")
+            time.sleep(1.1)  # ปลอดภัยใต้ 60/นาที
 
         if not all_prices:
             print("  ⚠️ ไม่ได้ข้อมูลเลย")
@@ -547,11 +557,11 @@ def check_prices(watchlist: dict, alerted: dict):
                 print(f"  ❓ ${ticker} — ข้ามไป")
 
         status["last_ok_count"] = ok_count
-        status["yfinance_ok"]   = True
+        status["data_ok"]   = True
 
     except Exception as e:
-        status["yfinance_ok"] = False
-        print(f"  [yfinance] ERROR: {e}")
+        status["data_ok"] = False
+        print(f"  [data] ERROR: {e}")
 
 
 def price_loop(watchlist_ref: list, alerted_ref: list):
