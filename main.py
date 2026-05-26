@@ -24,7 +24,7 @@ TELEGRAM_CHAT_ID  = os.environ.get("TELEGRAM_CHAT_ID", "")
 SHEET_ID          = os.environ.get("SHEET_ID", "")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDS_JSON", "")
 
-CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL", "120"))
+CHECK_INTERVAL    = int(os.environ.get("CHECK_INTERVAL", "300"))
 THRESHOLD_PCT     = float(os.environ.get("THRESHOLD_PCT", "1.0"))
 
 SHEET_RANGE       = "ชีต1!A:E"  # TICKER | S1 | S2 | S3 | NOTE
@@ -389,24 +389,19 @@ def check_and_report(watchlist: dict, custom_tickers: list = None):
     else:
         tickers = list(watchlist.keys())
     try:
-        BATCH_SIZE = 10
         prices = {}
-        for i in range(0, len(tickers), BATCH_SIZE):
-            batch = tickers[i:i+BATCH_SIZE]
+        for t in tickers:
             try:
-                data = yf.download(batch, period="1d", interval="5m", progress=False, auto_adjust=True)
-                if not data.empty:
-                    last = data["Close"].iloc[-1]
-                    for t in batch:
-                        try:
-                            prices[t] = float(last[t])
-                        except Exception:
-                            pass
-                time.sleep(2)
+                tk   = yf.Ticker(t)
+                hist = tk.history(period="1d", interval="5m")
+                if not hist.empty:
+                    prices[t] = float(hist["Close"].iloc[-1])
+                time.sleep(3)
             except Exception as e:
-                print(f"  [batch] ERROR: {e}")
+                print(f"  ❌ ${t} ERROR: {e}")
+                time.sleep(5)
         if not prices:
-            send("⚠️ ดึงข้อมูลไม่ได้ (อาจนอกเวลาตลาด หรือ rate limit)")
+            send("⚠️ ดึงข้อมูลไม่ได้ (อาจนอกเวลาตลาด)")
             return
     except Exception as e:
         send(f"❌ Error: {e}")
@@ -489,23 +484,18 @@ def check_prices(watchlist: dict, alerted: dict):
             status["alert_today"]      = 0
             status["last_alert_reset"] = today
 
-        # แบ่งดึงเป็น batch ละ 10 ตัว ป้องกัน rate limit
-        BATCH_SIZE = 10
+        # ดึงทีละตัว หน่วง 3 วินาที ป้องกัน rate limit
         all_prices = {}
-        for i in range(0, len(tickers), BATCH_SIZE):
-            batch = tickers[i:i+BATCH_SIZE]
+        for t in tickers:
             try:
-                data = yf.download(batch, period="1d", interval="5m", progress=False, auto_adjust=True)
-                if not data.empty:
-                    last = data["Close"].iloc[-1]
-                    for t in batch:
-                        try:
-                            all_prices[t] = float(last[t])
-                        except Exception:
-                            pass
-                time.sleep(2)  # หน่วงเล็กน้อยระหว่าง batch
+                tk   = yf.Ticker(t)
+                hist = tk.history(period="1d", interval="5m")
+                if not hist.empty:
+                    all_prices[t] = float(hist["Close"].iloc[-1])
+                    print(f"  ✅ ${t} = ${all_prices[t]:.2f}")
+                time.sleep(3)
             except Exception as e:
-                print(f"  [batch {i//BATCH_SIZE+1}] ERROR: {e}")
+                print(f"  ❌ ${t} ERROR: {e}")
                 time.sleep(5)
 
         if not all_prices:
